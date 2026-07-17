@@ -31,9 +31,11 @@ What a run looks like (existing app):
 ```
 ┌  s4-auth-react
 ●  target: /home/me/my-app [app, vite, ts]
+●  Router package: react-router-dom (App.tsx already imports from react-router-dom).
 ◇  Copied 5 adapter items into src/ and wrote .env.local.
-◇  Installing deps (npm): react-oidc-context oidc-client-ts react-router@^7
-◇  Wired the auth router into src/main.tsx.
+◇  Existing .env.local merged (backup: .env.local.bak).
+◇  Installing deps (npm): react-oidc-context oidc-client-ts
+◇  Wired the auth router into src/main.tsx (shape: router-in-app).
 ◆  Done
 │  Automated: adapter source → src/, .env.local, auth.config.ts defaults, deps, router.
 │  REQUIRED next (the codemod can't — these live in your app code):
@@ -69,19 +71,33 @@ instead.
 ## What the installer does
 
 - **Copies** the adapter into `src/` — `auth.config.ts`, `auth/` (AuthRoot, RequireAuth, RequireRole,
-  useAuthService, useIdleTimeout), `login/` (LoginPage, CallbackPage), `auth.css`, `vite-env.d.ts`.
-- **Installs** `react-oidc-context`, `oidc-client-ts`, `react-router@^7` via the detected package
-  manager (npm/pnpm/yarn/bun), skipping any already present.
-- **Writes** `.env.local` from the four Cognito values and patches per-app defaults in
-  `auth.config.ts` (`providers`, `appTitle`, `postLoginRoute`).
-- **Wires the router** into the app entry (`src/main.tsx`) — but only when it recognizes the shape:
-  a routerless `createRoot(...).render(<App/>)` entry is wrapped so `RequireAuth` becomes the sole
-  front door (public `/login` + `/auth/callback`, everything else gated). Any other shape is **left
-  untouched** and a wire-by-hand checklist is printed (an auth boundary — when in doubt, mutate
-  nothing).
+  useAuthService, useIdleTimeout), `login/` (LoginPage, CallbackPage), `auth.css`, and `vite-env.d.ts`.
+  If the app already has its own `src/vite-env.d.ts`, that file is **left untouched** and the adapter's
+  ambient types go to `src/s4-auth-env.d.ts` beside it, so your `vite/client` reference survives.
+- **Installs** `react-oidc-context`, `oidc-client-ts`, and a React Router v7 package via the detected
+  package manager (npm/pnpm/yarn/bun), skipping any already present. It **adopts the router package the
+  app already uses** — `react-router` or `react-router-dom` — rather than imposing one, so an app on
+  `react-router-dom` never ends up with two router copies (which silently produce a double router).
+- **Merges** `.env.local` from the four Cognito values — it never overwrites. Your existing variables
+  are preserved byte-for-byte; only the adapter's four keys are added (and a `.env.local.bak` is
+  written). It also patches per-app defaults in `auth.config.ts` (`providers`, `appTitle`,
+  `postLoginRoute`).
+- **Wires the router** into the app entry (`src/main.tsx`), recognizing three common shapes and
+  bailing safely on anything else:
+  - **Routerless entry** (`createRoot(...).render(<App/>)`, no router) — wrapped so `RequireAuth`
+    becomes the sole front door (public `/login` + `/auth/callback`, everything else gated).
+  - **Router in `App.tsx`** (entry is a bare `createRoot(<App/>)`, `App.tsx` owns a `<BrowserRouter>`) —
+    the router is hoisted into the entry (your `App.tsx`'s `<BrowserRouter>` is removed, its routes kept,
+    a `src/App.tsx.bak` is written) so there is exactly one router.
+  - **Router in the entry** (`<BrowserRouter><App/></BrowserRouter>`) — the entry is rebuilt around your
+    existing router; `App.tsx` is untouched.
+  - **Anything else** — data-mode `createBrowserRouter`, a `<BrowserRouter>` with props (e.g. `basename`),
+    or a shape it can't read — is **left untouched** and a wire-by-hand checklist is printed (an auth
+    boundary — when in doubt, mutate nothing).
 
 It is **idempotent**: a re-run on an installed app bails with a warning rather than clobbering edits
-(pass `--force` to overwrite).
+(pass `--force` to overwrite; on `.env.local`, `--force` also overwrites an adapter key whose value
+differs, which a plain run leaves alone and reports).
 
 ## Options
 
@@ -129,9 +145,12 @@ the app's own code, so no codemod can do them. The run prints them too.
 
 ## Unsupported router shape → wire by hand
 
-If the entry already has a router (`<Routes>`, `createBrowserRouter`) the installer prints a
-checklist and changes nothing. Wire it by hand: render `AuthRoot` above the router, add the two
-public routes, and gate the rest with `RequireAuth`.
+Most router layouts wire automatically (see "What the installer does" — routerless, router-in-`App.tsx`,
+and router-in-entry are all handled). The installer bails and prints this checklist only for shapes it
+won't touch safely: React Router **data mode** (`createBrowserRouter` / `<RouterProvider>`), a
+`<BrowserRouter>` carrying props such as `basename` (hoisting it would silently drop the prop), or an
+entry whose `App` import it can't resolve. In those cases nothing is mutated — wire it by hand: render
+`AuthRoot` above the router, add the two public routes, and gate the rest with `RequireAuth`.
 
 ```tsx
 import { AuthRoot } from './auth/AuthRoot';
@@ -173,5 +192,5 @@ into `children`.
 - **Re-login after logout can be silent.** If upstream Google SSO is still live, the next sign-in
   completes with no prompt — federation working, not a failed logout (C4). Force a fresh prompt on
   shared terminals with `extraQueryParams: { prompt: 'login' }` in `auth.config.ts`.
-- **The session survives a page reload.** Tokens live in `localStorage` (C2 default, DR-0006) — by
+- **The session survives a page reload.** Tokens live in `localStorage` (the C2 default) — by
   design. For a session that shouldn't outlive the tab, switch `userStore` to `sessionStorage`.
