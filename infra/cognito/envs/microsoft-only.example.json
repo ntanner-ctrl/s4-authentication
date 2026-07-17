@@ -1,0 +1,27 @@
+{
+  "_comment": "PRESET: Microsoft only. Supply Azure creds; leave google empty -> HasGoogleCredentials false -> SupportedIdentityProviders = [Microsoft] (COGNITO intentionally omitted, federated-only: C8.3). Secret empty; source from SSM/Secrets Manager at deploy time. managed_login_version: 1 = hosted UI classic, 2 = Managed Login branding (requires a per-client branding style).",
+  "customer": {
+    "name": "example",
+    "callback_domain": "example-dashboard.s4hospitality.net"
+  },
+  "cognito": {
+    "domain_prefix": "example-s4-auth"
+  },
+  "azure": {
+    "client_id": "00000000-0000-0000-0000-000000000000",
+    "tenant_id": "00000000-0000-0000-0000-000000000000",
+    "client_secret": ""
+  },
+  "google": {
+    "client_id": "",
+    "client_secret": ""
+  },
+  "options": {
+    "enable_admin_scope": "false",
+    "managed_login_version": "1"
+  },
+  "tags": {
+    "Service": "Auth",
+    "Owner": "ntanner@rdspos.com"
+  }
+}

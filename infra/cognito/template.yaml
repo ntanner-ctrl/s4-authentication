@@ -1,0 +1,396 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Cognito Auth Stack — standardized federated authentication via Amazon Cognito.
+  Supports Microsoft (Entra ID / Azure AD, OIDC) and/or Google (native) identity
+  providers; each is created only when its credentials are supplied, so ONE
+  template serves Microsoft-only, Google-only, and both deployments (provider mix
+  is a config concern, not a code fork — STANDARD.md C8).
+
+  Enforces the Auth Contract at the config level: C1 (public PKCE code-flow
+  client), C3 (token TTLs), C8 (baseline scopes; admin scope opt-in), and
+  federated-only sign-in (no native/SRP path).
+
+  One pool PER CUSTOMER (identity + IdP boundary; the one-Microsoft-IdP-per-pool
+  rule forces this). Supersedes the toolkit's dashboard-auth-stack +
+  microsoft-auth-stack.
+
+# =============================================================================
+# PARAMETERS
+# =============================================================================
+Parameters:
+  Client:
+    Type: String
+    Description: Customer identifier (lowercase, alphanumeric + hyphens, max 20 chars)
+    AllowedPattern: '^[a-z0-9][a-z0-9-]{0,19}$'
+    ConstraintDescription: >-
+      Must be lowercase alphanumeric with hyphens, start with a letter or number,
+      and be at most 20 characters.
+
+  Environment:
+    Type: String
+    Description: Deployment environment
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
+  CallbackDomain:
+    Type: String
+    Description: >-
+      App FQDN (no protocol prefix). Example: slims-dashboard.s4hospitality.net
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$'
+    ConstraintDescription: Must be a valid domain name without protocol prefix.
+
+  CognitoDomainPrefix:
+    Type: String
+    Description: >-
+      Globally unique prefix for the Cognito hosted domain (unique across ALL AWS
+      accounts). Suggest: {client}-s4-auth
+    AllowedPattern: '^[a-z0-9][a-z0-9-]{0,62}$'
+    ConstraintDescription: Lowercase alphanumeric with hyphens, 1-63 characters.
+
+  # --- Microsoft (Entra ID / Azure AD) — leave empty to skip Microsoft IdP ---
+  AzureClientId:
+    Type: String
+    Description: Azure Application (Client) ID. Leave empty to skip Microsoft IdP.
+    Default: ''
+    AllowedPattern: '^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$'
+    ConstraintDescription: Must be a valid GUID or empty string.
+
+  AzureTenantId:
+    Type: String
+    Description: Azure Directory (Tenant) ID. Leave empty to skip Microsoft IdP.
+    Default: ''
+    AllowedPattern: '^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$'
+    ConstraintDescription: Must be a valid GUID or empty string.
+
+  AzureClientSecret:
+    Type: String
+    Description: >-
+      Azure Client Secret VALUE. Leave empty to skip Microsoft IdP.
+      Source from SSM Parameter Store / Secrets Manager at deploy time — never a
+      literal in version control (STANDARD.md secret hygiene).
+    Default: ''
+    NoEcho: true
+
+  # --- Google — leave empty to skip Google IdP ---
+  GoogleClientId:
+    Type: String
+    Description: Google OAuth Client ID. Leave empty to skip Google IdP.
+    Default: ''
+
+  GoogleClientSecret:
+    Type: String
+    Description: >-
+      Google OAuth Client Secret. Leave empty to skip Google IdP.
+      Source from SSM / Secrets Manager at deploy time — never a literal.
+    Default: ''
+    NoEcho: true
+
+  # --- C8: admin scope is OPT-IN ---
+  EnableAdminScope:
+    Type: String
+    Description: >-
+      Add the aws.cognito.signin.user.admin OAuth scope. Only enable for apps
+      that call Cognito user APIs from the client (STANDARD.md C8 — opt-in).
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  # --- Branding version for the hosted auth pages ---
+  ManagedLoginVersion:
+    Type: Number
+    Description: >-
+      Branding version for the user pool domain. 1 = hosted UI (classic),
+      2 = Managed Login (branding editor; requires Essentials/Plus feature
+      plan). Per-domain — applies to ALL app clients on the domain. Switching
+      versions does not preserve hosted-UI SSO sessions (issued tokens
+      survive). Under version 2, programmatically created app clients also
+      need a ManagedLoginBranding style (CreateManagedLoginBranding) or the
+      login pages error.
+    Default: 1
+    AllowedValues:
+      - 1
+      - 2
+
+  # --- Tags ---
+  ServiceTag:
+    Type: String
+    Description: Service tag value for S4 tagging
+    Default: Auth
+
+  OwnerTag:
+    Type: String
+    Description: Owner email for S4 tagging
+    AllowedPattern: '^.+@.+\..+$'
+    ConstraintDescription: Must be a valid email address.
+
+# =============================================================================
+# RULES — deploy-time parameter assertions (evaluated before resource creation)
+# =============================================================================
+# NOTE: the Rules section uses its own intrinsic functions against parameters
+# directly; it CANNOT reference the Conditions below via !Condition.
+Rules:
+  # Since COGNITO native auth is intentionally omitted (federated-only;
+  # CONFORMANCE.md C8.3), a stack with neither Google nor Microsoft
+  # credentials would resolve SupportedIdentityProviders to an empty list and
+  # produce an app-client nobody can log in to. Fail fast with a clear message.
+  AtLeastOneFederatedIdP:
+    Assertions:
+      - Assert: !Or
+          - !And
+              - !Not [!Equals [!Ref GoogleClientId, '']]
+              - !Not [!Equals [!Ref GoogleClientSecret, '']]
+          - !And
+              - !Not [!Equals [!Ref AzureClientId, '']]
+              - !Not [!Equals [!Ref AzureTenantId, '']]
+              - !Not [!Equals [!Ref AzureClientSecret, '']]
+        AssertDescription: >-
+          At least one federated IdP must be configured: provide Google
+          (GoogleClientId + GoogleClientSecret) and/or Microsoft/Azure
+          (AzureClientId + AzureTenantId + AzureClientSecret). Native
+          username/password (COGNITO) is intentionally not offered.
+
+# =============================================================================
+# CONDITIONS
+# =============================================================================
+Conditions:
+  # Microsoft (Azure AD) — all three must be provided
+  HasAzureClientId: !Not [!Equals [!Ref AzureClientId, '']]
+  HasAzureTenantId: !Not [!Equals [!Ref AzureTenantId, '']]
+  HasAzureClientSecret: !Not [!Equals [!Ref AzureClientSecret, '']]
+  HasAzureCredentials: !And
+    - !Condition HasAzureClientId
+    - !Condition HasAzureTenantId
+    - !Condition HasAzureClientSecret
+
+  # Google — both must be provided
+  HasGoogleClientId: !Not [!Equals [!Ref GoogleClientId, '']]
+  HasGoogleClientSecret: !Not [!Equals [!Ref GoogleClientSecret, '']]
+  HasGoogleCredentials: !And
+    - !Condition HasGoogleClientId
+    - !Condition HasGoogleClientSecret
+
+  # C8 — admin scope opt-in
+  WithAdminScope: !Equals [!Ref EnableAdminScope, 'true']
+
+# =============================================================================
+# RESOURCES
+# =============================================================================
+Resources:
+  # --------------------------------------------------------------------------
+  # 1. Cognito User Pool  (one per customer)
+  # --------------------------------------------------------------------------
+  # UsernameAttributes and Schema(Required=true) are IMMUTABLE after creation —
+  # any change forces pool REPLACEMENT (destroys all users). Retain policies +
+  # DeletionProtection guard against data loss.
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolName: !Sub '${Client}-${Environment}-auth-users'
+      DeletionProtection: ACTIVE
+
+      # Sign-in: email only
+      UsernameAttributes:
+        - email
+
+      # Self-registration disabled — admin-only user creation (federated SSO)
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+
+      # Required attributes (IMMUTABLE after creation)
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+
+      # Cognito uses UserPoolTags (map), NOT Tags (array) — exempt from E9001
+      UserPoolTags:
+        Service: !Ref ServiceTag
+        Environment: !Ref Environment
+        Client: !Ref Client
+        Owner: !Ref OwnerTag
+
+  # --------------------------------------------------------------------------
+  # 2. Cognito User Pool Domain  ->  {prefix}.auth.{region}.amazoncognito.com
+  # --------------------------------------------------------------------------
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref CognitoDomainPrefix
+      UserPoolId: !Ref CognitoUserPool
+      # 1 = hosted UI (classic), 2 = Managed Login. Update is No-interruption.
+      # Version 2 requires creating a per-client branding style first.
+      ManagedLoginVersion: !Ref ManagedLoginVersion
+
+  # --------------------------------------------------------------------------
+  # 3. Microsoft OIDC Identity Provider (conditional)
+  # --------------------------------------------------------------------------
+  # Created only when all three Azure credentials are supplied. Microsoft is NOT
+  # a native Cognito social provider, so it is wired as generic OIDC against
+  # tenant-specific Entra endpoints (NEVER /common/ — that causes "Bad id_token
+  # issuer"). ProviderName MUST be exactly "Microsoft" — the frontend adapter's
+  # signInWithRedirect({ provider: { custom: 'Microsoft' } }) depends on it.
+  MicrosoftIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Condition: HasAzureCredentials
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ProviderName: Microsoft
+      ProviderType: OIDC
+      ProviderDetails:
+        client_id: !Ref AzureClientId
+        client_secret: !Ref AzureClientSecret
+        authorize_scopes: 'openid email profile'
+        attributes_request_method: GET
+        oidc_issuer: !Sub 'https://login.microsoftonline.com/${AzureTenantId}/v2.0'
+        authorize_url: !Sub 'https://login.microsoftonline.com/${AzureTenantId}/oauth2/v2.0/authorize'
+        token_url: !Sub 'https://login.microsoftonline.com/${AzureTenantId}/oauth2/v2.0/token'
+        attributes_url: 'https://graph.microsoft.com/oidc/userinfo'
+        jwks_uri: !Sub 'https://login.microsoftonline.com/${AzureTenantId}/discovery/v2.0/keys'
+      AttributeMapping:
+        email: email
+
+  # --------------------------------------------------------------------------
+  # 4. Google Identity Provider (conditional)
+  # --------------------------------------------------------------------------
+  # Native Cognito Google provider (Cognito owns the endpoints). Domain
+  # restriction (e.g. @rdspos.com) is set in the Google Cloud Console OAuth
+  # consent screen ("Internal"), not here.
+  GoogleIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Condition: HasGoogleCredentials
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ProviderName: Google
+      ProviderType: Google
+      ProviderDetails:
+        client_id: !Ref GoogleClientId
+        client_secret: !Ref GoogleClientSecret
+        authorize_scopes: 'openid email profile'
+      AttributeMapping:
+        email: email
+
+  # --------------------------------------------------------------------------
+  # 5. Cognito User Pool Client (App Client)
+  # --------------------------------------------------------------------------
+  # Public SPA client — no secret, PKCE authorization code flow only (C1).
+  # Federated-only: ExplicitAuthFlows carries ONLY refresh-token auth (needed for
+  # C3 silent refresh); no SRP/native password flow, so the /authorize code+PKCE
+  # redirect is the only viable path (RDS is one-touch SSO / federated-only).
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn:
+      - CognitoUserPoolDomain
+    Properties:
+      ClientName: !Sub '${Client}-${Environment}-auth'
+      UserPoolId: !Ref CognitoUserPool
+
+      # C1 — public PKCE code-flow client
+      GenerateSecret: false
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthFlowsUserPoolClient: true
+
+      # Federated-only — refresh needed for C3 silent refresh; no SRP/native path
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+      CallbackURLs:
+        # C5/C6 — the adapter's OAuth callback route (CallbackComponent scrubs it
+        # from history). Must equal the adapter's redirectSignIn
+        # (reference/angular-amplify-v6/auth.config.ts:155).
+        - !Sub 'https://${CallbackDomain}/auth/callback'
+      LogoutURLs:
+        # C4 — post-logout landing. MUST equal the adapter's logout_uri target,
+        # which is the app's /login route (auth.config.ts:134 postLogoutUrl ->
+        # ${origin}/login). Previously /auth/login — a fossil from the shared
+        # app-client URL sprawl; the adapter has no /auth/login route, so the
+        # hosted /logout would reject the logout_uri. Keep this list to exactly
+        # the routes this stack's app actually uses (do NOT re-accumulate the
+        # multi-product sprawl this framework exists to eliminate).
+        - !Sub 'https://${CallbackDomain}/login'
+
+      # C8 — baseline openid email profile; admin scope opt-in via EnableAdminScope
+      AllowedOAuthScopes: !If
+        - WithAdminScope
+        - - openid
+          - email
+          - profile
+          - aws.cognito.signin.user.admin
+        - - openid
+          - email
+          - profile
+
+      # Federated-only: COGNITO is intentionally OMITTED so the
+      # app-client never offers native username/password — listing COGNITO is
+      # what renders the password form on any hosted/managed login page. This
+      # completes the federated-only stance ExplicitAuthFlows already enforces
+      # (ALLOW_REFRESH_TOKEN_AUTH only). See CONFORMANCE.md C8.3.
+      # Each provider independently conditional; !Ref returns its ProviderName
+      # when present, AWS::NoValue removes the list item when absent.
+      SupportedIdentityProviders:
+        - !If [HasAzureCredentials, !Ref MicrosoftIdentityProvider, !Ref 'AWS::NoValue']
+        - !If [HasGoogleCredentials, !Ref GoogleIdentityProvider, !Ref 'AWS::NoValue']
+
+      # C3 — token lifetimes (silent refresh @60m; refresh 1d; idle 30m enforced client-side)
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 1
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+      PreventUserExistenceErrors: ENABLED
+
+# =============================================================================
+# OUTPUTS  (feed the frontend auth.config — STANDARD.md Config Vocabulary)
+# =============================================================================
+Outputs:
+  UserPoolId:
+    Description: Cognito User Pool ID -> auth.config userPoolId
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolId'
+
+  UserPoolArn:
+    Description: Cognito User Pool ARN (for JWKS/issuer config)
+    Value: !GetAtt CognitoUserPool.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolArn'
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID -> auth.config clientId
+    Value: !Ref CognitoUserPoolClient
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolClientId'
+
+  CognitoDomain:
+    Description: Cognito hosted domain -> auth.config cognitoDomain
+    Value: !Sub '${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com'
+    Export:
+      Name: !Sub '${AWS::StackName}-CognitoDomain'
+
+  RedirectURI:
+    Description: >-
+      IdP redirect URI. Azure: enter in the app registration. Google: enter in
+      Google Cloud Console OAuth credentials.
+    Value: !Sub 'https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com/oauth2/idpresponse'
+    Export:
+      Name: !Sub '${AWS::StackName}-RedirectURI'
+
+  AuthConfigBlock:
+    Description: >-
+      Ready-to-paste auth.config.ts values. Copy the three lines into
+      src/app/auth.config.ts (UserPoolId->userPoolId, UserPoolClientId->clientId,
+      CognitoDomain->cognitoDomain). cognitoDomain is emitted bare (no scheme).
+    Value: !Sub |
+      // --- paste into src/app/auth.config.ts ---
+      userPoolId: '${CognitoUserPool}',
+      clientId: '${CognitoUserPoolClient}',
+      cognitoDomain: '${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com',
