@@ -1,0 +1,30 @@
+{
+  "name": "@s4/auth-react",
+  "version": "0.1.0",
+  "description": "S4 standardized React + Cognito OIDC auth installer (bespoke npx CLI; bundles the reference adapter source).",
+  "keywords": ["react", "auth", "cognito", "oidc", "installer", "npx"],
+  "license": "UNLICENSED",
+  "private": true,
+  "bin": {
+    "s4-auth-react": "dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "scripts": {
+    "bundle": "bash scripts/bundle.sh",
+    "build": "npm run bundle && tsc -p tsconfig.json",
+    "clean": "rm -rf dist templates",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "~5.4.5",
+    "vitest": "^1.6.0"
+  }
+}

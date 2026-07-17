@@ -1,0 +1,215 @@
+/**
+ * login.component.ts — Angular 17 + Amplify v6 adapter
+ *
+ * Standalone, provider-configurable login/home component. Mechanism only
+ * (Angular template, signals); the outcomes it serves are STANDARD.md C8 and C6.
+ *
+ * Renders ONLY the IdP buttons for providers present in `authConfig.providers`
+ * (C8 — provider mix is config-driven, no code fork). Standardized layout with
+ * loading / error / returnUrl states. Each button calls Amplify v6
+ * `signInWithRedirect` via AuthService.signIn (C1).
+ *
+ * Idempotent: an already-authenticated visitor is forwarded (replaceUrl) to
+ * returnUrl ?? postLoginRoute instead of being offered sign-in — Amplify v6
+ * `signInWithRedirect` throws UserAlreadyAuthenticatedException otherwise.
+ */
+import { CommonModule } from '@angular/common';
+import { Component, OnInit, inject, signal } from '@angular/core';
+import { ActivatedRoute, Router } from '@angular/router';
+
+import { authConfig, type Provider } from '../auth.config';
+import { AuthService } from '../auth/auth.service';
+
+interface ProviderButton {
+  id: Provider;
+  label: string;
+}
+
+/** Display metadata for each known provider. Kept in the adapter (mechanism). */
+const PROVIDER_LABELS: Record<Provider, string> = {
+  google: 'Continue with Google',
+  microsoft: 'Continue with Microsoft',
+};
+
+@Component({
+  selector: 'app-login',
+  standalone: true,
+  imports: [CommonModule],
+  template: `
+    <div class="auth-page">
+    <main class="auth-card" role="main">
+      <h1 class="auth-card__title">{{ title }}</h1>
+
+      <!-- C6 — surfaced so the user knows they'll be returned to their target -->
+      @if (returnUrl()) {
+        <p class="auth-card__hint">You'll be returned to your page after signing in.</p>
+      }
+
+      @if (error()) {
+        <div class="auth-card__error" role="alert">{{ error() }}</div>
+      }
+
+      <!-- C8 — render ONLY the buttons for providers enabled in auth.config.
+           Changing the provider mix is a config edit, never a template edit. -->
+      <div class="auth-card__providers">
+        @for (btn of providers; track btn.id) {
+          <button
+            type="button"
+            class="auth-card__provider"
+            [class.auth-card__provider--google]="btn.id === 'google'"
+            [class.auth-card__provider--microsoft]="btn.id === 'microsoft'"
+            [disabled]="loading()"
+            (click)="login(btn.id)"
+          >
+            <!-- Official provider marks, inlined (no external image hosts —
+                 login must render on offline/kiosk networks). aria-hidden:
+                 the button text already names the provider. -->
+            @if (btn.id === 'google') {
+              <svg class="auth-card__provider-logo" viewBox="0 0 18 18" aria-hidden="true">
+                <path fill="#4285F4" d="M17.64 9.2045c0-.6381-.0573-1.2518-.1636-1.8409H9v3.4814h4.8436c-.2086 1.125-.8427 2.0782-1.7959 2.7164v2.2581h2.9087c1.7018-1.5668 2.6836-3.874 2.6836-6.615z"/>
+                <path fill="#34A853" d="M9 18c2.43 0 4.4673-.806 5.9564-2.1805l-2.9087-2.2581c-.8059.54-1.8368.859-3.0477.859-2.344 0-4.3282-1.5831-5.036-3.7104H.9574v2.3318C2.4382 15.9832 5.4818 18 9 18z"/>
+                <path fill="#FBBC05" d="M3.964 10.71c-.18-.54-.2822-1.1168-.2822-1.71s.1023-1.17.2823-1.71V4.9582H.9573A8.9965 8.9965 0 0 0 0 9c0 1.4523.3477 2.8268.9573 4.0418L3.964 10.71z"/>
+                <path fill="#EA4335" d="M9 3.5795c1.3214 0 2.5077.4541 3.4405 1.346l2.5813-2.5814C13.4632.8918 11.4259 0 9 0 5.4818 0 2.4382 2.0168.9573 4.9582L3.964 7.29C4.6718 5.1627 6.6559 3.5795 9 3.5795z"/>
+              </svg>
+            } @else if (btn.id === 'microsoft') {
+              <svg class="auth-card__provider-logo" viewBox="0 0 21 21" aria-hidden="true">
+                <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
+                <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
+                <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
+                <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
+              </svg>
+            }
+            <span>{{ btn.label }}</span>
+          </button>
+        }
+      </div>
+
+      @if (loading()) {
+        <p class="auth-card__loading" aria-live="polite">Redirecting to your provider…</p>
+      }
+
+      @if (providers.length === 0) {
+        <p class="auth-card__error" role="alert">
+          No identity providers are configured. Set <code>providers</code> in auth.config.
+        </p>
+      }
+    </main>
+    </div>
+  `,
+  styles: [
+    `
+      /* Full-viewport wrapper. position:fixed (not min-height) so the page
+         centers correctly no matter where the host app's router renders the
+         component — drop-in targets place /login inside arbitrary layout
+         shells (see dashboard-experimental's login, which needed the same). */
+      .auth-page {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1rem;
+        /* Plain blue-grey gradient — the login background the standardized
+           template lineage originally shared. Kept as the single visual
+           standard so the adapter stays a one-copy drop-in with no per-repo
+           asset wiring. */
+        background: linear-gradient(135deg, #f0f4f8, #d9e2ec);
+      }
+      .auth-card {
+        width: 100%;
+        max-width: 22rem;
+        margin: 0;
+        padding: 2rem;
+        border: 1px solid #e2e2e2;
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.12);
+        font-family: system-ui, sans-serif;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+      .auth-card__title { margin: 0; font-size: 1.5rem; text-align: center; }
+      .auth-card__hint { margin: 0; color: #555; font-size: 0.875rem; text-align: center; }
+      .auth-card__error {
+        background: #fdecea; color: #611a15; padding: 0.75rem 1rem;
+        border-radius: 8px; font-size: 0.875rem;
+      }
+      .auth-card__providers { display: flex; flex-direction: column; gap: 0.75rem; }
+      .auth-card__provider {
+        display: flex; align-items: center; justify-content: center; gap: 0.75rem;
+        padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid #dadce0;
+        background: #fff; font-size: 1rem; font-weight: 500; color: #3c4043;
+        cursor: pointer;
+      }
+      .auth-card__provider:hover:not(:disabled) { background: #f8f9fa; }
+      .auth-card__provider:disabled { opacity: 0.6; cursor: progress; }
+      /* --google / --microsoft modifier classes are kept on the buttons as
+         styling hooks for host apps; the standard look keeps both neutral. */
+      .auth-card__provider-logo { width: 18px; height: 18px; flex-shrink: 0; }
+      .auth-card__loading { margin: 0; text-align: center; color: #555; font-size: 0.875rem; }
+    `,
+  ],
+})
+export class LoginComponent implements OnInit {
+  private readonly auth = inject(AuthService);
+  private readonly route = inject(ActivatedRoute);
+  private readonly router = inject(Router);
+
+  /** Presentation — per-app heading from config (anti-fork), default standard. */
+  readonly title = authConfig.appTitle ?? 'Sign in';
+
+  /** C8 — derive the rendered buttons from config; no provider is hardcoded. */
+  readonly providers: ProviderButton[] = authConfig.providers.map((id) => ({
+    id,
+    label: PROVIDER_LABELS[id],
+  }));
+
+  readonly loading = signal(false);
+  readonly error = signal<string | null>(null);
+  readonly returnUrl = signal<string | null>(null);
+
+  ngOnInit(): void {
+    // C6 — capture the returnUrl the authGuard attached when bouncing the user here.
+    this.returnUrl.set(this.route.snapshot.queryParamMap.get('returnUrl'));
+
+    // If a redirect failed, the query may carry an error description.
+    const err = this.route.snapshot.queryParamMap.get('error_description')
+      ?? this.route.snapshot.queryParamMap.get('error');
+    if (err) this.error.set(err);
+
+    // Idempotent login — Amplify v6 `signInWithRedirect` THROWS
+    // UserAlreadyAuthenticatedException when a session already exists, so an
+    // already-authenticated visitor (Back from the app, bookmark, manual
+    // /login) must be forwarded to the app, never shown buttons that can only
+    // fail. replaceUrl because a page that auto-forwards must not remain in
+    // history — otherwise Back from the landing route bounces straight back
+    // here in a loop.
+    void this.auth.isAuthenticated().then((authed) => {
+      if (authed) {
+        void this.router.navigateByUrl(
+          this.returnUrl() ?? authConfig.postLoginRoute,
+          { replaceUrl: true },
+        );
+      }
+    });
+  }
+
+  /**
+   * Realizes STANDARD.md C1 — initiates Authorization Code + PKCE sign-in via the
+   * service's `signInWithRedirect` wrapper. Realizes C6 — passes returnUrl through
+   * the OAuth round-trip (customState) so the callback can land the user there.
+   */
+  async login(provider: Provider): Promise<void> {
+    this.error.set(null);
+    this.loading.set(true);
+    try {
+      await this.auth.signIn(provider, this.returnUrl() ?? undefined);
+      // On success the browser navigates away to the IdP; nothing more to do.
+    } catch (e) {
+      this.loading.set(false);
+      this.error.set(e instanceof Error ? e.message : 'Could not start sign-in. Please try again.');
+    }
+  }
+}

@@ -1,0 +1,369 @@
+/**
+ * auth.service.ts — Angular 17 + Amplify v6 adapter
+ *
+ * Wraps the Amplify v6 client SDK to realize the runtime auth outcomes of the
+ * Auth Contract (STANDARD.md). This file holds MECHANISM only (Amplify calls,
+ * RxJS, timers); the normative outcomes live in STANDARD.md.
+ *
+ * Amplify v6 APIs used (verified via Context7 /aws-amplify/docs):
+ *   - signInWithRedirect  (aws-amplify/auth)
+ *   - signOut             (aws-amplify/auth)
+ *   - fetchAuthSession    (aws-amplify/auth)  — SDK-verified, auto-refreshing
+ *   - getCurrentUser      (aws-amplify/auth)
+ *   - Hub.listen('auth')  (aws-amplify/utils) — v6 event names, incl.
+ *     `customOAuthState` (carries the C6 returnUrl as `payload.data`)
+ *
+ * NOTE: the redirect-landing page MUST execute `import
+ * 'aws-amplify/auth/enable-oauth-listener';` (done in CallbackComponent) or
+ * Amplify v6 never consumes the `code`/`state` and the Hub never fires. Verified
+ * via Context7 /aws-amplify/docs (external-identity-providers).
+ */
+import { DestroyRef, Injectable, NgZone, inject, signal } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import {
+  fetchAuthSession,
+  getCurrentUser,
+  signInWithRedirect,
+  signOut,
+} from 'aws-amplify/auth';
+import { Hub } from 'aws-amplify/utils';
+import { fromEvent, merge, Observable, Subject, Subscription } from 'rxjs';
+
+import { AMPLIFY_PROVIDER, authConfig, type Provider } from '../auth.config';
+
+/** A trust-bearing view of the session, only ever built from a verified session. */
+export interface AuthState {
+  authenticated: boolean;
+  /** Non-trust display only (e.g. greeting). Never gate access on this. */
+  email?: string;
+  /** Verified `sub` claim, for correlating requests. */
+  userId?: string;
+}
+
+const ACTIVITY_EVENTS = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'];
+
+@Injectable({ providedIn: 'root' })
+export class AuthService {
+  private readonly zone = inject(NgZone);
+  private readonly destroyRef = inject(DestroyRef);
+
+  /** Reactive auth state for templates/guards. Defaults UNKNOWN-as-unauthenticated (fail-closed friendly). */
+  readonly state = signal<AuthState>({ authenticated: false });
+
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private activitySub: Subscription | null = null;
+
+  /**
+   * C6 — the returnUrl captured from the OAuth `customOAuthState` Hub event
+   * (Amplify v6 re-emits the `customState` we passed to `signInWithRedirect`
+   * here, NOT on a query param). Read by CallbackComponent via `takeReturnUrl`.
+   */
+  private pendingReturnUrl: string | null = null;
+
+  /**
+   * C5 — fires AFTER Amplify v6 has asynchronously consumed the code/state and
+   * the session is verified. CallbackComponent subscribes and performs the
+   * single replacing navigation. Emitting here (not in ngOnInit) is the fix for
+   * the callback race: we navigate only once sign-in has actually resolved.
+   */
+  private readonly signInResolved$ = new Subject<void>();
+
+  /** Observable the callback page awaits before its replaceUrl navigation (C5). */
+  get signedIn$(): Observable<void> {
+    return this.signInResolved$.asObservable();
+  }
+
+  /**
+   * Fires when a redirect sign-in FAILS after returning to the app (Amplify
+   * rejected the code/state — e.g. expired code, state mismatch, token-endpoint
+   * error). CallbackComponent lands on /login with this message instead of
+   * stranding the user on "Completing sign-in…" forever. Fail closed, VISIBLY.
+   */
+  private readonly signInFailedSubject = new Subject<string>();
+
+  get signInFailed$(): Observable<string> {
+    return this.signInFailedSubject.asObservable();
+  }
+
+  /** C6 — hand the captured returnUrl to the caller exactly once (then clear it). */
+  takeReturnUrl(): string | null {
+    const url = this.pendingReturnUrl;
+    this.pendingReturnUrl = null;
+    return url;
+  }
+
+  constructor() {
+    // Realizes STANDARD.md C5 (partial) + C3 — react to OAuth resolution and token
+    // refresh outcomes. v6 event names verified via Context7.
+    Hub.listen('auth', ({ payload }) => {
+      // Hub fires outside Angular's zone; re-enter so signals/UI update.
+      this.zone.run(() => {
+        switch (payload.event) {
+          // Realizes STANDARD.md C6 — Amplify v6 re-emits the customState we
+          // passed to signInWithRedirect on THIS event (payload.data), never on
+          // a query param. Capture it as the returnUrl. Fires before signedIn.
+          case 'customOAuthState':
+            this.pendingReturnUrl =
+              typeof payload.data === 'string' && payload.data.length > 0
+                ? payload.data
+                : null;
+            break;
+          case 'signedIn':
+          case 'signInWithRedirect':
+            // Realizes STANDARD.md C5 (timing) — sign-in resolved ASYNCHRONOUSLY
+            // here; only now is the session verifiable. Sync state, arm timers,
+            // THEN signal the callback page to do its replaceUrl navigation.
+            void this.syncSession().then(() => {
+              this.startSessionTimers();
+              this.signInResolved$.next();
+            });
+            break;
+          case 'tokenRefresh':
+            // Silent refresh succeeded (C3) — re-arm the next pre-expiry refresh.
+            this.scheduleSilentRefresh();
+            break;
+          case 'tokenRefresh_failure':
+          case 'signInWithRedirect_failure':
+            // Refresh/redirect failed — fail closed: treat as logged out (C7 spirit).
+            void this.forceLocalLogout();
+            if (payload.event === 'signInWithRedirect_failure') {
+              // Surface the failure so the callback page can land on /login with
+              // feedback. Without this, the page waits for signedIn$ forever.
+              const detail = (payload.data as { error?: Error } | undefined)?.error?.message;
+              this.signInFailedSubject.next(
+                detail ?? 'Sign-in could not be completed. Please try again.',
+              );
+            }
+            break;
+          case 'signedOut':
+            this.clearTimers();
+            this.state.set({ authenticated: false });
+            break;
+        }
+      });
+    });
+
+    // Hydrate reactive state from any persisted, verified session on app load.
+    // The Hub 'signedIn' event fires ONLY on a fresh interactive sign-in — NOT on
+    // a page reload or navigation back into the SPA. Without this, after a refresh
+    // the `state` signal stays {authenticated:false} (so a header/UI bound to it
+    // shows "logged out") even though the session is valid and the guard — which
+    // calls fetchAuthSession directly — still grants access. Security held; the
+    // DISPLAYED state was stale. Caught end-to-end in runtime validation.
+    void this.syncSession().then(() => {
+      if (this.state().authenticated) this.startSessionTimers();
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // C1 / C8 — Sign-in via Authorization Code + PKCE, provider from config
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Realizes STANDARD.md C1 — Amplify v6 `signInWithRedirect` performs the
+   * Authorization Code flow with PKCE/S256 (responseType:'code' in auth.config).
+   * Realizes STANDARD.md C8 — `provider` must be one of `authConfig.providers`;
+   * we never hardcode a provider literal in callers.
+   * Realizes STANDARD.md C6 — `customState` carries the returnUrl across the
+   * redirect; Amplify v6 re-emits it on the `customOAuthState` Hub event (captured
+   * in the constructor), NOT on a query param.
+   */
+  async signIn(provider: Provider, returnUrl?: string): Promise<void> {
+    if (!authConfig.providers.includes(provider)) {
+      // Defense in depth for C8 — refuse a provider not enabled by config.
+      throw new Error(`Provider "${provider}" is not enabled in auth.config.`);
+    }
+    await signInWithRedirect({
+      provider: AMPLIFY_PROVIDER[provider],
+      customState: returnUrl,
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // C2 — Token access via SDK/JWKS-verified session (never a bare atob)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Realizes STANDARD.md C2 — returns tokens ONLY from `fetchAuthSession`, which
+   * resolves/validates against the issuer's JWKS (signature + iss + aud + exp)
+   * and auto-refreshes. The returned JWT is the SDK-verified object; we call
+   * `.toString()` for transport, NOT a bare `atob` decode to make a trust decision.
+   * Returns null when there is no valid session (caller fails closed).
+   */
+  async getAccessToken(): Promise<string | null> {
+    try {
+      const session = await fetchAuthSession();
+      return session.tokens?.accessToken?.toString() ?? null;
+    } catch {
+      return null; // C7 — error path yields no token (deny, never assume valid)
+    }
+  }
+
+  async getIdToken(): Promise<string | null> {
+    try {
+      const session = await fetchAuthSession();
+      return session.tokens?.idToken?.toString() ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Realizes STANDARD.md C2 + C7 — the single source of "are we authenticated?".
+   * Truth derives from a SDK/JWKS-verified session (presence of verified tokens),
+   * never from decoding a token ourselves. Any error => false (fail-closed).
+   */
+  async isAuthenticated(): Promise<boolean> {
+    try {
+      const session = await fetchAuthSession();
+      return Boolean(session.tokens?.accessToken);
+    } catch {
+      return false; // C7 — unknown/error => denied
+    }
+  }
+
+  /** Refresh the reactive state from a verified session (display fields are non-trust). */
+  async syncSession(): Promise<void> {
+    try {
+      const session = await fetchAuthSession();
+      if (!session.tokens?.accessToken) {
+        this.state.set({ authenticated: false });
+        return;
+      }
+      // `.payload` here is the SDK-parsed payload of an already-verified token.
+      // Used for DISPLAY/correlation only — the trust decision is the verified
+      // presence of the token above, satisfying C2.
+      const idPayload = session.tokens.idToken?.payload;
+      this.state.set({
+        authenticated: true,
+        email: typeof idPayload?.['email'] === 'string' ? (idPayload['email'] as string) : undefined,
+        userId: typeof idPayload?.['sub'] === 'string' ? (idPayload['sub'] as string) : undefined,
+      });
+    } catch {
+      this.state.set({ authenticated: false }); // fail-closed
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // C4 — Logout is complete: (1) global revoke, (2) clear local, (3) /logout redirect
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Realizes STANDARD.md C4 — performs ALL THREE steps; no stub.
+   *   1. Global session revocation at the provider: signOut({ global: true }).
+   *   2. Clears all locally stored tokens/session state (Amplify clears its own
+   *      storage on signOut; we also stop timers and reset reactive state).
+   *   3. Redirects through the Cognito hosted `/logout` endpoint so the IdP
+   *      session ends and the user cannot silently re-enter.
+   *
+   * SINGLE REDIRECT PATH: when oauth is configured, Amplify v6 `signOut` itself
+   * BUILDS the hosted endpoint `https://<domain>/logout?client_id&logout_uri=<redirectSignOut>`
+   * and redirects there (see auth.config.ts `redirectUrls`; `redirectSignOut` is
+   * the bare /login landing, NOT a hand-built /logout URL). The SDK's own redirect
+   * IS step 3 — there is no competing manual `window.location.assign`, eliminating
+   * the redirect race. The SDK owns the navigation; we own the revoke + local clear.
+   */
+  async logout(): Promise<void> {
+    this.clearTimers();
+    this.state.set({ authenticated: false });
+    try {
+      // Step 1 + Step 2 + (SDK) Step 3: global revoke, local-storage clear, and
+      // the redirect to redirectSignOut (the hosted /logout endpoint).
+      // Verified via Context7: global sign-out is the { global: true } option,
+      // and oauth-configured signOut performs the redirect itself.
+      await signOut({ global: true });
+    } catch {
+      // Even if the network revoke / SDK redirect fails, we MUST NOT leave a
+      // usable local session — fall back to a local clear (C4 step 2).
+      await this.forceLocalLogout();
+    }
+  }
+
+  /** Belt-and-suspenders local clear if the global call throws (C4 step 2). */
+  private async forceLocalLogout(): Promise<void> {
+    this.clearTimers();
+    try {
+      await signOut(); // local sign-out clears Amplify's token storage
+    } catch {
+      /* swallow — local state already reset below */
+    }
+    this.state.set({ authenticated: false });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // C3 — Session lifetime: silent refresh before expiry + 30-min idle timeout
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /** Arm both the silent-refresh scheduler and the idle watchdog. Idempotent. */
+  startSessionTimers(): void {
+    this.scheduleSilentRefresh();
+    this.startIdleWatch();
+  }
+
+  /**
+   * Realizes STANDARD.md C3 (silent refresh) — proactively refresh BEFORE the
+   * 60-min access-token expiry so the user never hits a re-login at the boundary.
+   * We refresh at accessTtl minus a 5-min safety skew via forceRefresh, which
+   * fetchAuthSession honors (verified via Context7).
+   */
+  private scheduleSilentRefresh(): void {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    const skew = 5 * 60_000;
+    const delay = Math.max(authConfig.session.accessTtl - skew, 30_000);
+    // setTimeout outside Angular's zone to avoid keeping change detection busy.
+    this.zone.runOutsideAngular(() => {
+      this.refreshTimer = setTimeout(() => {
+        void fetchAuthSession({ forceRefresh: true })
+          .then(() => this.zone.run(() => this.scheduleSilentRefresh()))
+          .catch(() => this.zone.run(() => this.forceLocalLogout()));
+      }, delay);
+    });
+  }
+
+  /**
+   * Realizes STANDARD.md C3 (idle timeout) — 30 minutes (config.session.idleTimeout)
+   * with no user activity triggers a logout via C4. Activity resets the timer.
+   * (Mechanism note: this is the hand-rolled equivalent of @ng-idle's Idle/Keepalive;
+   * a real app may swap in @ng-idle/core — the *outcome* is what C3 fixes.)
+   */
+  private startIdleWatch(): void {
+    this.activitySub?.unsubscribe();
+    const activity$ = merge(
+      ...ACTIVITY_EVENTS.map((e) => fromEvent(window, e, { passive: true })),
+    );
+    this.zone.runOutsideAngular(() => {
+      this.activitySub = activity$
+        .pipe(takeUntilDestroyed(this.destroyRef))
+        .subscribe(() => this.resetIdleTimer());
+    });
+    this.resetIdleTimer();
+  }
+
+  private resetIdleTimer(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      // 30 min elapsed with no activity -> complete logout (C4).
+      this.zone.run(() => void this.logout());
+    }, authConfig.session.idleTimeout);
+  }
+
+  private clearTimers(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.idleTimer = null;
+    this.refreshTimer = null;
+    this.activitySub?.unsubscribe();
+    this.activitySub = null;
+  }
+
+  /** Convenience for the login component's "already signed in?" check. */
+  async getCurrentUserName(): Promise<string | null> {
+    try {
+      const user = await getCurrentUser();
+      return user.username ?? null;
+    } catch {
+      return null;
+    }
+  }
+}

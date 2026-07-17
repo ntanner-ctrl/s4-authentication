@@ -1,0 +1,17 @@
+# curated-manifest-root.txt — shared root payload staged into $STAGE/ by the orchestrator.
+# Format: <source-path-relative-to-repo-root>  ->  <dest-path-relative-to-$STAGE>
+# Lines starting with # and blank lines are ignored.
+
+# NOTE: no root README mapping — each distribution branch supplies its own
+# framework README (packages/<fw>/README-main.md -> README.md) via its export.sh,
+# which runs after this shared-root stage and would overwrite a root one anyway.
+STANDARD.md                             -> STANDARD.md
+infra/cognito/template.yaml             -> infra/cognito/template.yaml
+infra/cognito/README.md                 -> infra/cognito/README.md
+infra/cognito/envs                      -> infra/cognito/envs
+infra/cognito/scripts/deploy.sh         -> infra/cognito/scripts/deploy.sh
+infra/cognito/scripts/deploy.ps1        -> infra/cognito/scripts/deploy.ps1
+infra/cognito/scripts/destroy.sh        -> infra/cognito/scripts/destroy.sh
+infra/cognito/scripts/destroy.ps1       -> infra/cognito/scripts/destroy.ps1
+infra/cognito/scripts/fetch-config.sh   -> infra/cognito/scripts/fetch-config.sh
+infra/cognito/scripts/fetch-config.ps1  -> infra/cognito/scripts/fetch-config.ps1

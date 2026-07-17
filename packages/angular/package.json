@@ -1,0 +1,30 @@
+{
+  "name": "s4-auth-angular",
+  "version": "0.1.0",
+  "description": "S4 standardized Angular 17 + Amplify v6 auth, installed via ng add.",
+  "keywords": ["ng-add", "schematics", "angular", "auth", "cognito"],
+  "license": "UNLICENSED",
+  "private": true,
+  "schematics": "./schematics/collection.json",
+  "ng-add": { "save": "dependencies" },
+  "files": [
+    "schematics/collection.json",
+    "schematics/ng-add/index.js",
+    "schematics/ng-add/add-routes.js",
+    "schematics/ng-add/schema.json",
+    "schematics/ng-add/files"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.schematics.json",
+    "test": "npm run build && jasmine \"schematics/**/*_spec.js\""
+  },
+  "devDependencies": {
+    "@angular-devkit/core": "^17.3.0",
+    "@angular-devkit/schematics": "^17.3.0",
+    "@schematics/angular": "^17.3.0",
+    "@types/jasmine": "^5.1.0",
+    "@types/node": "^20.11.0",
+    "jasmine": "^5.1.0",
+    "typescript": "~5.4.5"
+  }
+}

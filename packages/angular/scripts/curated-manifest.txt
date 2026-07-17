@@ -1,0 +1,15 @@
+# curated-manifest.txt — Angular package payload staged into $TARGET/angular/ by export.sh.
+# Format: <source-path-relative-to-repo-root>  ->  <dest-path-relative-to-$TARGET>
+# Lines starting with # and blank lines are ignored.
+# Build artifacts (schematics/**/*.js) are produced by `npm run build` BEFORE staging
+# and are matched by the schematics/ng-add glob below.
+# Shared root files (STANDARD.md, README.md, infra/cognito/) live in curated-manifest-root.txt.
+
+packages/angular/package.json                       -> package.json
+packages/angular/README-main.md                     -> README.md
+packages/angular/schematics/collection.json         -> schematics/collection.json
+packages/angular/schematics/ng-add/index.js         -> schematics/ng-add/index.js
+packages/angular/schematics/ng-add/add-routes.js    -> schematics/ng-add/add-routes.js
+packages/angular/schematics/ng-add/schema.json      -> schematics/ng-add/schema.json
+packages/angular/schematics/ng-add/files            -> schematics/ng-add/files
+packages/angular/schematics/MANUAL-INSTALL.md       -> schematics/MANUAL-INSTALL.md

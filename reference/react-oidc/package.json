@@ -1,0 +1,19 @@
+{
+  "name": "s4-auth-react-oidc-reference",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Canonical React adapter source for STANDARD.md. Not a runnable app; type-check harness only.",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "oidc-client-ts": "^3.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-oidc-context": "^3.2.0",
+    "react-router": "^7.18.0",
+    "typescript": "~5.4.5"
+  }
+}

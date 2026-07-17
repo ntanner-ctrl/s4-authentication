@@ -1,0 +1,26 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`GOLDEN: vusion's wrapped entry is byte-identical to v0.3.1 1`] = `
+"
+  import { createRoot } from "react-dom/client";
+  import App from "./App.tsx";
+  import "./index.css";
+import { AuthRoot } from "./auth/AuthRoot";
+import { RequireAuth } from "./auth/RequireAuth";
+import { LoginPage } from "./login/LoginPage";
+import { CallbackPage } from "./login/CallbackPage";
+import { BrowserRouter, Routes, Route } from "react-router";
+
+  createRoot(document.getElementById("root")!).render(
+  <AuthRoot>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/auth/callback" element={<CallbackPage />} />
+        <Route path="/*" element={<RequireAuth><App /></RequireAuth>} />
+      </Routes>
+    </BrowserRouter>
+  </AuthRoot>
+);
+"
+`;

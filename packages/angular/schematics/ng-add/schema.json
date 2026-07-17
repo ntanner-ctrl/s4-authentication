@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/schema",
+  "$id": "S4AuthAngularNgAdd",
+  "title": "S4 Auth Angular ng-add options",
+  "type": "object",
+  "properties": {
+    "project": {
+      "type": "string",
+      "description": "Target Angular project name.",
+      "$default": { "$source": "projectName" }
+    },
+    "userPoolId": {
+      "type": "string",
+      "description": "Cognito User Pool ID (CFN Output: UserPoolId).",
+      "x-prompt": "Cognito User Pool ID?"
+    },
+    "clientId": {
+      "type": "string",
+      "description": "Cognito app client ID (CFN Output: UserPoolClientId).",
+      "x-prompt": "Cognito app client ID?"
+    },
+    "cognitoDomain": {
+      "type": "string",
+      "description": "Cognito hosted domain, no scheme (CFN Output: CognitoDomain).",
+      "x-prompt": "Cognito hosted domain (e.g. auth.example.com)?"
+    },
+    "providers": {
+      "type": "string",
+      "description": "Comma-separated enabled IdPs.",
+      "default": "google",
+      "x-prompt": "Which IdPs? (comma-separated, e.g. google,microsoft)"
+    },
+    "appTitle": {
+      "type": "string",
+      "description": "Login-card heading.",
+      "default": "Sign in",
+      "x-prompt": "Login-card heading?"
+    }
+  },
+  "required": ["userPoolId", "clientId", "cognitoDomain"]
+}

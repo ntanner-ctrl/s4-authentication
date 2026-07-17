@@ -1,0 +1,16 @@
+# Line-ending policy: this repo is LF-only.
+#
+# Developed on WSL/Linux and deployed to Unix/AWS, so every text file is
+# stored AND checked out as LF. The practical payoff: if an editor ever
+# saves a file with Windows CRLF endings, Git normalizes it away instead of
+# treating it as a modification — so a stray CRLF can never block a branch
+# checkout or stash the way it did before this file existed.
+
+# Auto-detect text vs binary; normalize all text to LF in the repo and on checkout.
+* text=auto eol=lf
+
+# Belt-and-suspenders for files that break with CRLF even on a Windows checkout.
+# (Redundant with the rule above today, but explicit so it survives any future
+#  softening of the '*' line.)
+*.sh   text eol=lf
+*.bash text eol=lf

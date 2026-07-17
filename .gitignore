@@ -1,0 +1,15 @@
+# Local / machine-specific Claude tooling + epistemic state — not part of the
+# project source (development scaffolding, kept locally, never shipped).
+.claude/
+.epistemic/
+
+# Transient / large artifacts
+*.heapsnapshot
+*.tmp
+*~
+
+# Working-copy leftovers from the validation branch checkout
+# (source + docs are tracked on validation/auth-framework-runtime;
+# only node_modules/dist build artifacts remain here)
+/validation/
+reference/react-oidc/node_modules/

@@ -1,0 +1,215 @@
+/**
+ * auth.config.ts — Angular 17 + Amplify v6 adapter
+ *
+ * TYPED BINDING of the STANDARD.md "Config Vocabulary" table (the machine-readable
+ * half of the port). The *names and meanings* are defined in STANDARD.md; this file
+ * is their Angular/Amplify *encoding*. A future React adapter binds the SAME
+ * vocabulary in its own idiom.
+ *
+ * Anti-drift rule (STANDARD.md "Config Vocabulary"): everything a value can express
+ * lives here; behavioral policy that code can't express lives in STANDARD.md. The
+ * normative TTL *figures* (60 min / 1 day / 30 min) are owned by STANDARD.md C3; this
+ * file binds to them — it must not become a competing source of truth, so the values
+ * below are annotated with the clause they realize.
+ *
+ * VALUES SOURCED FROM THE COGNITO CFN `Outputs` (infra/cognito/).
+ * The Output -> config mapping is called out per field. At deploy time these are
+ * injected (env substitution / Angular environment file / runtime config fetch);
+ * the placeholders below are the ONLY things that are deploy-time-specific.
+ */
+
+/** The set of IdPs this adapter knows how to render + initiate (C8). */
+export type Provider = 'google' | 'microsoft';
+
+/**
+ * Amplify v6 maps our lowercase vocabulary provider names to its own
+ * `signInWithRedirect({ provider })` literals. Kept in the adapter (mechanism),
+ * NOT in STANDARD.md (which only knows "google"/"microsoft").
+ * Realizes STANDARD.md C8 — provider identity is config-driven, not code-forked.
+ */
+export const AMPLIFY_PROVIDER: Record<Provider, 'Google' | { custom: string }> = {
+  // Google is a BUILT-IN Amplify AuthProvider/OAuthProvider -> bare string.
+  google: 'Google',
+  // Microsoft (Entra ID / Azure AD) is NOT a built-in provider — Amplify only
+  // knows Google/Amazon/Apple/Facebook. A custom OIDC IdP MUST be passed as
+  // `{ custom: '<name>' }` (the name it is registered under in Cognito), to BOTH
+  // `signInWithRedirect({ provider })` and the Amplify.configure oauth.providers
+  // array. The bare string 'Microsoft' is a type error and fails at runtime.
+  // (Caught by compiling the reference in a real Ng17 host during runtime
+  // validation; verified against @aws-amplify/auth inputs.d.ts AuthProvider and
+  // @aws-amplify/core CustomProvider.)
+  microsoft: { custom: 'Microsoft' },
+};
+
+/**
+ * Typed binding of the STANDARD.md Config Vocabulary table.
+ * Each field cites the vocabulary item and the clause(s) it drives.
+ */
+export interface AuthConfig {
+  /** Vocab `providers` — enabled IdPs. Drives C8. Login renders only these. */
+  providers: Provider[];
+
+  /**
+   * Optional login-card heading ("Dashboard Login", "Acme Reports", …).
+   * Presentation-only — per-app branding is a config edit, never a template
+   * fork (same anti-fork rule as `providers`). Defaults to "Sign in".
+   */
+  appTitle?: string;
+
+  /** Vocab `userPoolId` — Cognito user pool id. Drives C1–C4. CFN Output: `UserPoolId`. */
+  userPoolId: string;
+
+  /** Vocab `clientId` — Cognito app-client id. Drives C1. CFN Output: `UserPoolClientId`. */
+  clientId: string;
+
+  /**
+   * Vocab `cognitoDomain` — hosted domain for /authorize and /logout endpoints.
+   * Drives C1 (authorize) and C4 (logout). CFN Output: `CognitoDomain`.
+   * Bare host, no scheme (e.g. "auth.example.com" or
+   * "my-pool.auth.us-east-1.amazoncognito.com").
+   */
+  cognitoDomain: string;
+
+  /**
+   * Vocab `scopes` — OAuth scopes. Drives C8.
+   * Baseline is `['openid','email','profile']`. The
+   * `aws.cognito.signin.user.admin` scope is opt-in (add it here ONLY where the
+   * app calls Cognito user APIs from the client).
+   */
+  scopes: string[];
+
+  /**
+   * Vocab `postLoginRoute` — the single configurable post-login landing route.
+   * Drives C6. Read from here, never a hardcoded literal in a guard/component.
+   */
+  postLoginRoute: string;
+
+  /**
+   * Vocab `session.*` — lifetime knobs. Drives C3.
+   * accessTtl/refreshTtl are the IdP-side figures (enforced in the Cognito
+   * app-client CFN, not by this client); they are mirrored here so the silent-
+   * refresh scheduler knows when to act. idleTimeout is enforced client-side.
+   */
+  session: {
+    /** Access/ID token TTL. STANDARD.md C3 = 60 min. CFN: AccessTokenValidity/IdTokenValidity. */
+    accessTtl: number; // milliseconds
+    /** Refresh token TTL. STANDARD.md C3 = 1 day (24 h). CFN: RefreshTokenValidity. */
+    refreshTtl: number; // milliseconds
+    /** Idle logout. STANDARD.md C3 = 30 min. Enforced client-side (no CFN equivalent). */
+    idleTimeout: number; // milliseconds
+  };
+}
+
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+
+/**
+ * The active config instance.
+ *
+ * Placeholders (`__..__`) are the deploy-time values from the CFN `Outputs`;
+ * everything else is policy bound to STANDARD.md and should NOT be edited per app.
+ * Changing `providers` / `scopes` here is the WHOLE mechanism for C8 — no code fork.
+ */
+export const authConfig: AuthConfig = {
+  // C8 — enabled providers come from config. Example: a Google-only product.
+  // Set to ['google','microsoft'] for both, ['microsoft'] for MS-only, etc.
+  providers: ['google'],
+
+  // Presentation — login-card heading. Omit to get the "Sign in" default.
+  appTitle: 'Sign in',
+
+  userPoolId: '__USER_POOL_ID__', // CFN Output: UserPoolId
+  clientId: '__USER_POOL_CLIENT_ID__', // CFN Output: UserPoolClientId
+  cognitoDomain: '__COGNITO_HOSTED_DOMAIN__', // CFN Output: CognitoDomain
+
+  // C8 — baseline scopes. Add 'aws.cognito.signin.user.admin' ONLY if this app
+  // calls Cognito user APIs client-side (opt-in).
+  scopes: ['openid', 'email', 'profile'],
+
+  // C6 — single configurable landing route.
+  postLoginRoute: '/home',
+
+  session: {
+    accessTtl: 60 * MIN, // C3: 60 min
+    refreshTtl: DAY, // C3: 1 day
+    idleTimeout: 30 * MIN, // C3: 30 min idle logout
+  },
+};
+
+/** App origin, resolved per-env (SSR-safe fallback for the reference). */
+function appOrigin(): string {
+  return typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4200';
+}
+
+/**
+ * Where the app lands after the Cognito hosted `/logout` ends the IdP session.
+ * Must be in the app-client's allowed sign-out URL list (CFN). Realizes C4's
+ * post-logout destination.
+ */
+export function postLogoutUrl(config: AuthConfig = authConfig): string {
+  void config; // reserved for per-config overrides
+  return `${appOrigin()}/login`;
+}
+
+/**
+ * Deploy-time callback/redirect URLs. Origin-relative outcomes of C4/C5/C6:
+ *  - `redirectSignIn` is where Cognito returns the `code` (the callback route
+ *    CallbackComponent scrubs from history via replaceUrl — C5).
+ *  - `redirectSignOut` (C4 step 3) is the **plain post-logout landing URL** (the
+ *    app's /login). Amplify v6's `signOut` BUILDS the hosted endpoint itself —
+ *    `https://<domain>/logout?client_id=<id>&logout_uri=<redirectSignOut>` (see
+ *    @aws-amplify/auth oAuthSignOutRedirect). So this MUST be the bare landing
+ *    URL: hand-building a `/logout?...` URL here double-wraps `logout_uri` (the
+ *    nested URL isn't allow-listed) and Cognito rejects it with
+ *    "Required String parameter 'redirect_uri' is not present".
+ *    (Caught end-to-end in runtime validation.)
+ * Both MUST be in the app-client's allowed callback/logout URL lists (CFN):
+ * redirectSignIn -> CallbackURLs, redirectSignOut -> LogoutURLs.
+ */
+function redirectUrls(config: AuthConfig) {
+  const origin = appOrigin();
+  return {
+    redirectSignIn: [`${origin}/auth/callback`],
+    // C4 — bare landing URL; Amplify wraps it into the hosted /logout endpoint.
+    redirectSignOut: [postLogoutUrl(config)],
+  };
+}
+
+/**
+ * Amplify v6 `Amplify.configure(...)` derivation from `authConfig`.
+ *
+ * Verified against Amplify v6 docs (Context7 /aws-amplify/docs):
+ *   - modular config shape `{ Auth: { Cognito: { userPoolId, userPoolClientId,
+ *     loginWith: { oauth: {...} } } } }`
+ *   - `responseType: 'code'`  -> Realizes STANDARD.md C1 (Authorization Code flow;
+ *     Amplify adds PKCE/S256 automatically for code flow). The implicit grant is
+ *     NEVER selected here (responseType is always 'code', never 'token').
+ *
+ * Call once at app bootstrap:  Amplify.configure(buildAmplifyConfig(authConfig));
+ */
+export function buildAmplifyConfig(config: AuthConfig = authConfig) {
+  const { redirectSignIn, redirectSignOut } = redirectUrls(config);
+
+  return {
+    Auth: {
+      Cognito: {
+        userPoolId: config.userPoolId,
+        userPoolClientId: config.clientId,
+        loginWith: {
+          oauth: {
+            domain: config.cognitoDomain,
+            scopes: config.scopes, // C8 — scopes from config
+            redirectSignIn, // C5/C6 callback target
+            redirectSignOut, // C4 post-logout target
+            // Realizes STANDARD.md C1 — Authorization Code + PKCE(S256).
+            // 'code' is the ONLY accepted value; the implicit grant is prohibited.
+            responseType: 'code' as const,
+            // C8 — derive enabled hosted-UI providers from config, not code.
+            providers: config.providers.map((p) => AMPLIFY_PROVIDER[p]),
+          },
+        },
+      },
+    },
+  };
+}
